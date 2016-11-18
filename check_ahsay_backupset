@@ -5,22 +5,24 @@ require 'phagios/Phagios.php';
 
 class checkAhsayBackupsetPlugin extends Phagios
 {
-    protected $pluginTimeZone = 'Europe/Brussels';
+    protected $pluginTimeZone = 'Europe/London';
     protected $pluginName = 'check_ahsay_backupset';
     protected $pluginVersion = '1.1.0';
     protected $pluginVersionInfo = '
     $configPluginName - $configPluginVersion
     (c) 2015 Hannes Van de Vel - Connexeon
+    Edited by William Spong for version 7 compatibility
 
     ';
     protected $pluginOpts;
-    protected $pluginShortOpts = 'H:l:a:u:b:s:d:e:z:';
+    protected $pluginShortOpts = 'H:l:a:u:b:D:s:d:e:z:';
     protected $pluginLongOpts = array(
         'hostname:',
         'logname:',
         'authentication:',
         'user:',
         'backupset-id:',
+        'destination-id:',
         'schedule:',
         'due-time:',
         'estimated-job-duration',
@@ -32,6 +34,7 @@ class checkAhsayBackupsetPlugin extends Phagios
         check_ahsay_backupset -H <hostname>
         -l <adminusername> -a <adminpassword>
         -u <username> -b <backupset-id>
+        -D <destination-id>
         -s <5x1|7x1|7x6|7x12|7x24|7x30>
         [-d <0-24h|0-59m>] [-e <hours>]
         [-z <timezone>] [-v|vv|vvv]
@@ -58,7 +61,10 @@ class checkAhsayBackupsetPlugin extends Phagios
         Ahsay username of backupset to check (case sensitive)
 
         -b, --backupset-id
-        Ahsay backupset ID (**not** the name, the numeric ID)
+        Ahsay backupset ID (NOT the name, the numeric ID, found in Users / Username / Backupset / listed in the URL as id=************* / or under General tab)
+
+        -D, --destination-id
+        Ahsay destination ID (NOT the name, the numeric ID found in Users / Username / Backupset / Destination link / listed in the URL as id=*************)
 
         -s, --schedule
         Backup schedule (to determine the backup freshness)
@@ -157,6 +163,11 @@ class checkAhsayBackupsetPlugin extends Phagios
             $this->debugOutput('--backupset, -b arg: '.$backupSet, self::VERBOSE_ADDITIONAL);
         }
 
+        if (isset($this->pluginOpts['D'])) {
+            $destinationid = $this->pluginOpts['D'];
+            $this->debugOutput('--destinationid, -D arg: '.$destinationid, self::VERBOSE_ADDITIONAL);
+        }
+
         if (isset($this->pluginOpts['s'])) {
             switch ($this->pluginOpts['s']) {
                     case '5x1':  $schedule = SCHEDULE_5x1;  $defaultDueTime = 10; break;
@@ -227,12 +238,12 @@ class checkAhsayBackupsetPlugin extends Phagios
                 'option -e: invalid value. Should be numeric');
         }
 
-        $lastJobObject = $api->getMostRecentBackupJob($user, $backupSet);
+        $lastJobObject = $api->getMostRecentBackupJob($user, $backupSet, $destinationid);
         if ($lastJobObject == false) {
             throw new PhagiosCriticalException(
                 "No backup jobs found for user $user, backupset $backupSet");
         }
-        $lastJobDetailObject = $api->getUserBackupJobDetails($user, $backupSet, $lastJobObject);
+        $lastJobDetailObject = $api->getUserBackupJobDetails($user, $backupSet, $destinationid, $lastJobObject);
 
         $lastJobStartTime = date_create($lastJobDetailObject['StartTime']);
         $lastJobEndTime = date_create($lastJobDetailObject['EndTime']);
@@ -254,6 +265,8 @@ class checkAhsayBackupsetPlugin extends Phagios
             } elseif (!strcmp($lastJobStatusCode, 'BS_SCHEDULE_NOT_FINISHED')) {
                 $lastJobStatus = 'Still Running';
             } elseif (!strcmp($lastJobStatusCode, 'BS_STILL_RUNNING')) {
+                $lastJobStatus = 'Still Running';
+            } elseif (!strcmp($lastJobStatusCode, 'BS_STOP_INCOMPLETE')) {
                 $lastJobStatus = 'Still Running';
             } elseif (!strcmp($lastJobStatusCode,  'BS_MISSED_DATABASAE')) {
                 $lastJobStatus = 'Missed a database';
@@ -434,6 +447,7 @@ class checkAhsayBackupsetPlugin extends Phagios
 
                 case 'BS_SCHEDULE_NOT_FINISHED':
                 case 'BS_STILL_RUNNING':
+                case 'BS_STOP_INCOMPLETE':
                 case '':
                 $return = 'Backup is running since '.$lastJobStartTime->format('d/m H:i').'.';
                 break;
@@ -443,7 +457,9 @@ class checkAhsayBackupsetPlugin extends Phagios
             }
         $this->debugOutput('Next backup due in '.$periodToNextJobDue->format('%hh %im'), self::VERBOSE_ADDITIONAL);
 
-        if ($currentTime < $nextJobDueTime) {
+        if ( in_array($lastJobStatusCode, array('BS_SCHEDULE_NOT_FINISHED', 'BS_STILL_RUNNING', 'BS_STOP_INCOMPLETE')))
+            throw new PhagiosWarningException($return);
+        else if ($currentTime < $nextJobDueTime) {
             $return .= ' Expires in '.$periodToNextJobDue->format('%dd %hh %im').'.';
             if ($currentTime > $nextJobStartOverDueTime) {
                 $return .= ' Backup did not start yet, it should be running by now.';
